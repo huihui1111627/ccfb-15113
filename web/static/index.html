@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>风筝节组通信 · 消息投递可视化</title>
+<style>
+  :root {
+    --bg: #0f1419; --panel: #1a2027; --panel2: #222a33; --line: #2e3944;
+    --text: #d7dee6; --muted: #8a97a5; --accent: #4da3ff; --good: #46c98d;
+    --warn: #f0b455; --bad: #ef6b6b; --purple: #b084f5;
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font: 13px/1.5 -apple-system,"PingFang SC","Microsoft YaHei",monospace;
+         background:var(--bg); color:var(--text); }
+  header { padding:14px 20px; background:var(--panel); border-bottom:1px solid var(--line);
+           display:flex; align-items:center; gap:16px; flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0; font-weight:600; }
+  select, button { background:var(--panel2); color:var(--text); border:1px solid var(--line);
+           border-radius:6px; padding:6px 10px; font-size:13px; cursor:pointer; }
+  button:hover, select:hover { border-color:var(--accent); }
+  .stat { display:flex; gap:18px; margin-left:auto; }
+  .stat b { color:var(--accent); font-size:15px; }
+  main { padding:16px 20px; display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px; }
+  .card h2 { font-size:13px; margin:0 0 10px; color:var(--muted); text-transform:uppercase;
+             letter-spacing:.5px; display:flex; justify-content:space-between; }
+  .full { grid-column:1 / -1; }
+  .member { border:1px solid var(--line); border-radius:8px; margin-bottom:10px; overflow:hidden; }
+  .member .mhead { display:flex; align-items:center; gap:10px; padding:8px 12px; background:var(--panel2); }
+  .dot { width:9px; height:9px; border-radius:50%; background:var(--good); }
+  .dot.dead { background:var(--bad); }
+  .dot.flush { background:var(--warn); } .dot.joining { background:var(--purple); }
+  .tag { font-size:11px; padding:1px 7px; border-radius:10px; background:var(--line); color:var(--muted); }
+  .tag.flush { background:#4a3820; color:var(--warn); }
+  .tag.joining { background:#342a4a; color:var(--purple); }
+  .mbody { padding:8px 12px; }
+  .seq { display:flex; flex-wrap:wrap; gap:4px; }
+  .chip { font-size:11px; padding:2px 6px; border-radius:5px; background:var(--panel2);
+          border:1px solid var(--line); cursor:pointer; }
+  .chip:hover { border-color:var(--accent); }
+  .chip.void { border-color:var(--bad); color:var(--bad); }
+  .bufrow { font-size:12px; color:var(--muted); margin-top:6px; }
+  .bufrow b { color:var(--warn); font-weight:600; }
+  table { width:100%; border-collapse:collapse; font-size:12px; }
+  th,td { text-align:left; padding:5px 8px; border-bottom:1px solid var(--line); }
+  th { color:var(--muted); font-weight:600; position:sticky; top:0; background:var(--panel); }
+  tr.clickable { cursor:pointer; }
+  tr.clickable:hover { background:var(--panel2); }
+  tr.selected { background:#203040; }
+  .kind { color:var(--muted); }
+  .k-send{color:var(--accent)} .k-deliver{color:var(--good)} .k-buffer,.k-wait{color:var(--warn)}
+  .k-nack,.k-repair{color:var(--purple)} .k-view,.k-void,.k-crash{color:var(--bad)}
+  .scroll { max-height:420px; overflow:auto; }
+  #detail { padding:0; }
+  #detail .inner { padding:14px; }
+  .kv { display:grid; grid-template-columns:130px 1fr; gap:4px 10px; font-size:12px; }
+  .kv .k { color:var(--muted); }
+  .wait-good { color:var(--good); } .wait-bad { color:var(--warn); }
+  .views span { display:inline-block; margin:2px; padding:2px 8px; border-radius:6px;
+               background:var(--panel2); border:1px solid var(--line); font-size:11px; }
+  .muted { color:var(--muted); }
+  .legend { font-size:11px; color:var(--muted); margin-top:8px; }
+  .legend i { font-style:normal; margin-right:10px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🪁 组通信中间件 · 投递过程</h1>
+  <select id="scenario"></select>
+  <button id="reload">重新运行</button>
+  <div class="stat">
+    <span>发送 <b id="st-sent">0</b></span>
+    <span>投递 <b id="st-del">0</b></span>
+    <span>作废 <b id="st-void">0</b></span>
+    <span>NACK <b id="st-nack">0</b></span>
+  </div>
+</header>
+
+<main>
+  <section class="card">
+    <h2>① 组成员与当前视图 <span class="muted" id="viewline"></span></h2>
+    <div id="members"></div>
+    <div class="views" id="views"></div>
+  </section>
+
+  <section class="card">
+    <h2>② 等待投递的缓冲区（实时快照）</h2>
+    <div id="buffers"></div>
+    <div class="legend">
+      <i>🟡 因果缓冲：等依赖消息</i><i>🟣 全序待定：等最终序号</i>
+    </div>
+  </section>
+
+  <section class="card full">
+    <h2>③ 每个成员收发与投递的消息序列（点击消息看详情）</h2>
+    <div class="scroll">
+      <table id="msgtable">
+        <thead><tr><th>消息</th><th>发送者</th><th>内容</th><th>发送时间</th>
+          <th>视图</th><th>状态</th><th>各成员投递时刻 (final号)</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>④ 视图变更过程 / 事件流</h2>
+    <div class="scroll" id="events"></div>
+  </section>
+
+  <section class="card" id="detail-card">
+    <h2>⑤ 消息下钻：在每个成员被扣多久、卡在哪一条</h2>
+    <div id="detail"><div class="inner muted">点击上方任意一条消息查看。</div></div>
+  </section>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+let snap = null, selected = null;
+
+function ref(r){ return 'm' + r.origin + '#' + r.seq; }
+function kindClass(k){
+  if(k.startsWith('send')) return 'k-send';
+  if(k.includes('deliver')) return 'k-deliver';
+  if(k.includes('buffer')||k.includes('wait')) return 'k-wait';
+  if(k.includes('nack')||k.includes('repair')||k.includes('prov')) return 'k-nack';
+  if(k.includes('view')||k.includes('void')||k.includes('crash')||k.includes('join')) return 'k-view';
+  return 'kind';
+}
+
+async function load(name){
+  const url = '/api/snapshot?scenario=' + encodeURIComponent(name || '');
+  snap = await (await fetch(url)).json();
+  render();
+}
+
+function render(){
+  $('#st-sent').textContent = snap.stats.sent;
+  $('#st-del').textContent = snap.stats.delivered;
+  $('#st-void').textContent = snap.stats.void;
+  $('#st-nack').textContent = snap.stats.nacks;
+  $('#viewline').textContent = '结束时刻 t=' + snap.endTime;
+  renderMembers(); renderBuffers(); renderMessages(); renderEvents(); renderViews();
+  if(selected) showDetail(selected);
+}
+
+function renderMembers(){
+  const el = $('#members'); el.innerHTML='';
+  snap.members.forEach(m=>{
+    const dot = m.alive ? (m.phase==='flushing'?'flush':m.phase==='joining'?'joining':'') : 'dead';
+    const div = document.createElement('div'); div.className='member';
+    const clock = Object.entries(m.clock).map(([k,v])=>'m'+k+':'+v).join(' ');
+    const deliv = (m.delivered||[]).map(d=>{
+      const c = document.createElement('span'); c.className='chip';
+      c.textContent = ref(d.msg)+'('+d.finalNo+')';
+      c.onclick = ()=>showDetail(d.msg);
+      return c.outerHTML;
+    }).join(' ');
+    div.innerHTML = '<div class="mhead"><span class="dot '+dot+'"></span>'
+      + '<b>成员 m'+m.id+'</b>'
+      + '<span class="tag '+(m.phase==='normal'?'':m.phase)+'">'+(m.alive?m.phase:'已掉线')+'</span>'
+      + '<span class="tag">视图 '+m.view+'</span>'
+      + '<span class="muted">VC { '+clock+' }</span></div>'
+      + '<div class="mbody"><div class="seq">'+(deliv||'<span class="muted">无投递</span>')+'</div></div>';
+    el.appendChild(div);
+  });
+}
+
+function renderBuffers(){
+  const el = $('#buffers'); el.innerHTML='';
+  snap.members.forEach(m=>{
+    const causal = (m.causalBuffer||[]).map(r=>ref(r)).join(', ');
+    const total = (m.totalPending||[]).map(p=>ref(p.msg)
+      +(p.headBlocked?'🚧':'')+'[prov='+p.provisional+(p.final?',fin='+p.final:'')+']').join(', ');
+    const div=document.createElement('div'); div.className='bufrow';
+    div.innerHTML = '<b>m'+m.id+'</b> 因果缓冲: '+(causal||'—')
+      +'<br><b>m'+m.id+'</b> 全序待定: '+(total||'—');
+    el.appendChild(div);
+  });
+}
+
+function renderMessages(){
+  const tb = $('#msgtable tbody'); tb.innerHTML='';
+  snap.messages.forEach(msg=>{
+    const k = msg.msg.origin+'-'+msg.msg.seq;
+    const per = msg.perMember.filter(p=>p.deliveredAt>0)
+      .map(p=>'m'+p.member+':t'+p.deliveredAt+'('+p.finalNo+')').join(' ');
+    const tr=document.createElement('tr'); tr.className='clickable';
+    if(selected && selected.origin===msg.msg.origin && selected.seq===msg.msg.seq) tr.classList.add('selected');
+    tr.innerHTML='<td>'+ref(msg.msg)+'</td><td>m'+msg.sender+'</td><td>'+msg.content+'</td>'
+      +'<td>t'+msg.sendTime+'</td><td>'+msg.sendView+'</td>'
+      +'<td>'+(msg.void?'<span style="color:var(--bad)">作废</span>':'正常')+'</td>'
+      +'<td class="muted">'+(per||'—')+'</td>';
+    tr.onclick=()=>showDetail(msg.msg);
+    tb.appendChild(tr);
+  });
+}
+
+function renderEvents(){
+  const el=$('#events'); el.innerHTML='<table><thead><tr><th>时刻</th><th>成员</th><th>事件</th><th>消息</th><th>详情</th></tr></thead><tbody>';
+  let html='';
+  snap.events.forEach(ev=>{
+    html += '<tr><td>t'+ev.time+'</td><td>m'+ev.member+'</td>'
+      + '<td class="'+kindClass(ev.kind)+'">'+ev.kind+'</td>'
+      + '<td>'+(ev.msg?ref(ev.msg):'')+'</td><td class="muted">'+ev.detail+'</td></tr>';
+  });
+  el.innerHTML = '<div class="scroll"><table><thead><tr><th>时刻</th><th>成员</th><th>事件</th><th>消息</th><th>详情</th></tr></thead><tbody>'+html+'</tbody></table></div>';
+}
+
+function renderViews(){
+  const el=$('#views');
+  el.innerHTML = snap.views.map(v=>'<span>视图 '+v.view+'</span>').join(' ')
+    || '<span class="muted">全程单视图，无视图变更</span>';
+}
+
+function showDetail(r){
+  selected = r;
+  document.querySelectorAll('#msgtable tr').forEach(tr=>tr.classList.remove('selected'));
+  const msg = snap.messages.find(m=>m.msg.origin===r.origin && m.msg.seq===r.seq);
+  if(!msg) return;
+  let rows = msg.perMember.map(p=>{
+    const cw = p.causalWait>0 ? '<span class="wait-bad">'+p.causalWait+' ticks</span>' : '<span class="wait-good">0</span>';
+    const tw = p.totalWait>0 ? '<span class="wait-bad">'+p.totalWait+' ticks</span>' : '<span class="wait-good">0</span>';
+    return '<tr><td>m'+p.member+'</td><td>'+(p.reliableRecv?('t'+p.reliableRecv):'<span class="muted">未收到</span>')+'</td>'
+      +'<td>'+cw+'</td><td>'+tw+'</td>'
+      +'<td>'+(p.blockedOn||'<span class="wait-good">无阻塞</span>')+'</td>'
+      +'<td>'+(p.deliveredAt?('t'+p.deliveredAt+' / final='+p.finalNo):'<span class="muted">未投递</span>')+'</td></tr>';
+  }).join('');
+  $('#detail').innerHTML = '<div class="inner">'
+    + '<h3 style="margin:0 0 10px">'+ref(msg.msg)+' · '+msg.content+'</h3>'
+    + '<div class="kv">'
+    + '<span class="k">发送者</span><span>m'+msg.sender+'</span>'
+    + '<span class="k">发送时刻</span><span>t'+msg.sendTime+'（视图 '+msg.sendView+'）</span>'
+    + '<span class="k">最终状态</span><span>'+(msg.void?'<b style="color:var(--bad)">冲刷阶段作废（无存活成员收到）</b>':'已正常投递')+'</span>'
+    + '</div>'
+    + '<table style="margin-top:12px"><thead><tr><th>成员</th><th>可靠接收</th><th>因果层等待</th><th>全序层等待</th><th>阻塞原因</th><th>投递</th></tr></thead>'
+    + '<tbody>'+rows+'</tbody></table>'
+    + '<div class="legend">因果层等待 = 进入因果缓冲到依赖满足；全序层等待 = 暂定序号队首拿到最终序号之前的阻塞时长。</div>'
+    + '</div>';
+  renderMessages();
+}
+
+async function init(){
+  const names = await (await fetch('/api/scenarios')).json();
+  const sel = $('#scenario');
+  names.forEach(n=>{ const o=document.createElement('option'); o.value=n; o.textContent=n; sel.appendChild(o); });
+  sel.onchange = ()=>load(sel.value);
+  $('#reload').onclick = ()=>load(sel.value);
+  await load(names[0]);
+}
+init();
+</script>
+</body>
+</html>
